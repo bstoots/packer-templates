@@ -5,7 +5,16 @@ require 'rainbow'
 require 'rspec/core/rake_task'
 require 'uri'
 
-task :default => ['packer:validate', 'packer:check_iso_url']
+VAGRANT_PROVIDERS = {
+  virtualbox: {
+    builder_type: 'virtualbox-iso'
+  },
+  vmware_desktop: {
+    builder_type: 'vmware-iso'
+  }
+}.freeze
+
+task default: ['packer:validate', 'packer:check_iso_url']
 
 namespace :packer do
   desc 'Validate all the packer templates'
@@ -14,7 +23,7 @@ namespace :packer do
       puts Rainbow("Validating #{template}...").green
       unless system "packer validate #{template}"
         puts Rainbow("#{template} is not a valid packer template").red
-        fail "#{template} is not a valid packer template"
+        raise "#{template} is not a valid packer template"
       end
     end
   end
@@ -24,30 +33,38 @@ namespace :packer do
     Pathname.glob('*.json').sort.each do |template|
       json = JSON.parse(template.read)
       mirror = json['variables']['mirror']
-      json['builders'].each do |builder|
-        iso_url = builder['iso_url'].sub('{{user `mirror`}}', mirror)
+      iso_urls = json['builders'].map do |builder|
+        builder['iso_url'].sub('{{user `mirror`}}', mirror)
+      end
+      iso_urls.uniq.each do |iso_url|
         puts Rainbow("Checking if #{iso_url} is available...").green
         request_head(iso_url) do |response|
           unless available?(response)
             puts Rainbow("#{iso_url} is not available: #{response.message}").red
-            fail "#{iso_url} is not available"
+            raise "#{iso_url} is not available"
           end
         end
       end
     end
   end
 
-  desc 'Push the packer template to Atlas'
-  task :push, [:template, :slug, :version] do |t, args|
+  desc 'Build and upload the vagrant box to Atlas'
+  task :release, [:template, :slug, :version, :provider] do |_t, args|
     template = Pathname.new(args[:template])
-    slug = args[:slug]
-    version = args[:version]
+    slug     = args[:slug]
+    version  = args[:version]
+    provider = args[:provider]
 
     json = JSON.parse(template.read)
+
+    builders = json['builders']
+    builders.select! do |builder|
+      builder['type'] == VAGRANT_PROVIDERS[provider.to_sym][:builder_type]
+    end
+
     post_processors = json['post-processors']
-    post_processors << atlas_post_processor_config(slug, version)
+    post_processors << atlas_post_processor_config(slug, version, provider)
     json['post-processors'] = [post_processors]
-    json['push'] = push_config(slug)
 
     file = Tempfile.open('packer-templates') do |f|
       f.tap do |f|
@@ -55,23 +72,16 @@ namespace :packer do
       end
     end
 
-    unless system("packer push -var-file=vars/release.json '#{file.path}'")
-      puts Rainbow("Failed to push #{template} to Atlas").red
-      fail "Failed to push #{template} to Atlas"
+    unless system("packer build -var-file=vars/release.json '#{file.path}'")
+      puts Rainbow("Failed to release #{slug} to Atlas").red
+      raise "Failed to release #{slug} to Atlas"
     end
   end
 end
 
-namespace :spec do
-  Pathname.glob('*.json').sort.each do |template|
-    name = template.basename('.json').to_s
-    host = name.gsub(/[.]/, '_')
-    desc "Run serverspec to #{host}"
-    RSpec::Core::RakeTask.new(host) do |task|
-      ENV['HOST'] = host
-      task.pattern = 'spec/*_spec.rb'
-    end
-  end
+desc 'Run serverspec tests'
+RSpec::Core::RakeTask.new(:spec, :host) do |_t, args|
+  ENV['HOST'] = args[:host]
 end
 
 def request_head(uri, &block)
@@ -85,22 +95,14 @@ def available?(response)
   response.is_a?(Net::HTTPSuccess) || response.is_a?(Net::HTTPRedirection)
 end
 
-def atlas_post_processor_config(slug, version)
+def atlas_post_processor_config(slug, version, provider)
   {
     'type' => 'atlas',
     'artifact' => slug,
     'artifact_type' => 'vagrant.box',
     'metadata' => {
       'version' => version,
-      'provider' => 'virtualbox',
-    },
-  }
-end
-
-def push_config(slug)
-  {
-    'name' => slug,
-    'base_dir' => File.dirname(__FILE__),
-    'vcs' => true,
+      'provider' => provider
+    }
   }
 end

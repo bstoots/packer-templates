@@ -8,6 +8,26 @@ def home_directory
   end
 end
 
+def synced_folder_fstype
+  return if %w(freebsd openbsd).include?(os[:family])
+
+  if virtualbox?
+    'vboxsf'
+  elsif vmware?
+    if %w(arch fedora).include?(os[:family])
+      'fuse.vmhgfs-fuse'
+    elsif os[:family] == 'ubuntu' && os[:release] == '12.04'
+      'vmhgfs'
+    elsif os[:family] == 'ubuntu' && os[:release] == '14.04'
+      'none'
+    elsif os[:family] == 'ubuntu'
+      'fuse.vmhgfs-fuse'
+    else
+      'vmhgfs'
+    end
+  end
+end
+
 describe user('vagrant') do
   it { should exist }
   it { should belong_to_group 'vagrant' }
@@ -32,8 +52,8 @@ describe file('/etc/vagrant_box_build_time') do
   it { should be_file }
 end
 
-describe file('/vagrant'), unless: %w(freebsd openbsd).include?(os[:family]) do
-  it { should be_mounted.with type: 'vboxsf' }
+describe file('/vagrant'), if: synced_folder_fstype do
+  it { should be_mounted.with type: synced_folder_fstype }
   it { should be_directory }
   it { should be_owned_by 'vagrant' }
   it { should be_grouped_into 'vagrant' }
